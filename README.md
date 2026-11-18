@@ -2,14 +2,28 @@
 
 > **English:** Local macOS tool that groups near-duplicate shots in your Apple Photos library (SigLIP embeddings + time window), ranks each group with TOPIQ, LAION aesthetics and Apple Vision (aesthetics, face quality, eyes open), and tags the best shot and the deletion candidates with keywords. It never deletes anything. Docs below are in German.
 
+## Fork changes (tslmy)
+
+- **`--library PATH`** picks the `.photoslibrary` explicitly (e.g. one on an external drive). Keywords are only written when the Photos app has that same library open; otherwise tagging is skipped with a message.
+- **Scoped tagging:** a run only removes keywords from photos in its own `--since`/`--until` range, so scanning year by year keeps earlier years' tags. Keywords are sent to Photos in batches of 500.
+- **New `lowq` command:** flags standalone low-quality photos (low TOPIQ, low Apple aesthetic score, or Apple's "utility" class such as screenshots and documents), optionally confirmed per photo by a local VLM (`--vlm`), writes `~/.photo_cleanup/reports/lowq *.csv` and tags `cleanup_lowq`. Thresholds: `--topiq-max` (0.30), `--aes-max` (-0.30).
+- **VLM:** English prompts, `think: false`, JSON parsed from the reply text (Ollama's MLX runner rejects `format: json`), default model `qwen3.5:9b-mlx`.
+- **uv-managed:** `uv sync`, then `uv run photo_cleanup.py …`.
+
+```bash
+uv run photo_cleanup.py scan --library "/Volumes/<drive>/<name>.photoslibrary" --limit 500 --no-albums
+uv run photo_cleanup.py lowq --library "/Volumes/<drive>/<name>.photoslibrary" --limit 500 --no-albums --vlm
+```
+
+---
+
 Läuft komplett lokal auf dem Mac. Liest die Fotos-Mediathek, gruppiert ähnliche Aufnahmen, wählt pro Gruppe das beste Foto und markiert es mit dem Schlagwort **bestes_foto**, alle anderen mit **loeschkandidat**. **Es löscht nichts** – du schaust die Kandidaten in Fotos durch und löschst selbst.
 
 ## Setup (einmalig)
 
 ```bash
 cd photo-cleanup
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
 
 - **Terminal braucht Zugriff auf Fotos:** Systemeinstellungen → Datenschutz & Sicherheit → *Festplattenvollzugriff* → Terminal (bzw. iTerm) aktivieren.
@@ -22,20 +36,20 @@ Optional, für knappe Entscheidungen per Vision-LLM:
 
 ```bash
 brew install ollama && ollama serve &
-ollama pull qwen2.5vl:7b
+ollama pull qwen3.5:9b-mlx
 ```
 
 ## Benutzung
 
 ```bash
 # Erst klein testen: die neuesten 500 Fotos, nur Bericht
-python photo_cleanup.py scan --limit 500 --no-albums
+uv run photo_cleanup.py scan --limit 500 --no-albums
 
 # Ein Jahr, mit Schlagwörtern
-python photo_cleanup.py scan --since 2025-01-01 --until 2025-12-31
+uv run photo_cleanup.py scan --since 2025-01-01 --until 2025-12-31
 
 # Mit Vision-LLM als Schiedsrichter bei knappen Gruppen
-python photo_cleanup.py scan --since 2025-01-01 --vlm
+uv run photo_cleanup.py scan --since 2025-01-01 --vlm
 ```
 
 Die Analyse wird in `~/.photo_cleanup/cache.sqlite` gespeichert. Ein zweiter Lauf analysiert nur neue Fotos und ist deshalb schnell. Berichte (CSV mit allen Scores) liegen in `~/.photo_cleanup/reports/`.
@@ -44,7 +58,7 @@ Die Analyse wird in `~/.photo_cleanup/cache.sqlite` gespeichert. Ein zweiter Lau
 
 1. `scan` ausführen
 2. In Fotos das intelligente Album (Schlagwort **loeschkandidat**) öffnen, durchsehen, mit ⌘⌫ löschen, was weg soll
-3. `python photo_cleanup.py learn` – das Skript schaut, welche Kandidaten du wirklich gelöscht hast, und passt die Gewichtung an deinen Geschmack an
+3. `uv run photo_cleanup.py learn` – das Skript schaut, welche Kandidaten du wirklich gelöscht hast, und passt die Gewichtung an deinen Geschmack an
 4. Beim nächsten `scan` gelten die gelernten Gewichte
 
 ## Feintuning

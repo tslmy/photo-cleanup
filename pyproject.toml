@@ -1,0 +1,23 @@
+[project]
+name = "photo-cleanup"
+version = "0.2.0"
+description = "Find similar and low-quality photos in an Apple Photos library and tag them for review (local, offline)."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "osxphotos",
+    "numpy",
+    "pillow",
+    "pillow-heif",
+    "torch",
+    "torchvision",
+    "transformers",
+    "pyiqa",
+    "setuptools<81", # pyiqa (laion_aes) braucht pkg_resources
+    "pyobjc-framework-Vision",
+    "scikit-learn",
+]
+
+[tool.uv]
+package = false
