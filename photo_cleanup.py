@@ -254,11 +254,36 @@ def apple_vision_scores(path: str) -> dict:
 
 # ---------------------------------------------------------------- Stufe 1–4: Index + Analyse
 
-def open_photos_db():
-    # osxphotos sucht sonst nur die "zuletzt geöffnete" Mediathek, die fehlen kann
-    import osxphotos
+LIBRARY: str | None = None  # set from --library in main()
+
+
+def resolve_library() -> str:
+    """The library to read. Explicit --library wins; otherwise the one Photos opened last."""
     from osxphotos.utils import get_last_library_path, get_system_library_path
-    return osxphotos.PhotosDB(dbfile=get_last_library_path() or get_system_library_path())
+    lib = LIBRARY or get_last_library_path() or get_system_library_path()
+    if not lib or not Path(lib).exists():
+        sys.exit(f"Photos library not found: {lib!r} (is the drive mounted? use --library PATH)")
+    return str(Path(lib).resolve())
+
+
+def open_photos_db():
+    import osxphotos
+    lib = resolve_library()
+    log(f"Library: {lib}")
+    return osxphotos.PhotosDB(dbfile=lib)
+
+
+def check_photos_app_library() -> bool:
+    """AppleScript writes to whatever library the Photos app has open, not to --library.
+    Refuse to tag unless they are the same library."""
+    from osxphotos.utils import get_last_library_path
+    target = resolve_library()
+    current = get_last_library_path()
+    if not current or Path(current).resolve() != Path(target):
+        log(f"NOT tagging: Photos app last opened {current!r}, but the scan used {target!r}. "
+            "Open the right library in Photos (hold ⌥ while launching Photos) and re-run.")
+        return False
+    return True
 
 
 def library_photos(args):
@@ -422,23 +447,36 @@ def rank_group(group: list[Item], weights: dict) -> list[Item]:
 
 # ---------------------------------------------------------------- Stufe 6: Vision-LLM
 
-def vlm_pick(cands: list[Item], model: str, host: str) -> tuple[int, str] | None:
-    imgs = []
-    for c in cands:
-        buf = io.BytesIO()
-        load_image(c.path, 768).save(buf, format="JPEG", quality=85)
-        imgs.append(base64.b64encode(buf.getvalue()).decode())
-    prompt = (f"Du siehst {len(cands)} sehr ähnliche Fotos, nummeriert 1 bis {len(cands)} in der gegebenen "
-              "Reihenfolge. Welches sollte man behalten? Achte auf Schärfe, offene Augen, Gesichtsausdruck, "
-              "Bildausschnitt und Belichtung. Antworte nur als JSON: "
-              '{"best": <Nummer>, "reason": "<ein kurzer Satz auf Deutsch>"}')
-    body = {"model": model, "stream": False, "format": "json",
-            "messages": [{"role": "user", "content": prompt, "images": imgs}]}
+def _encode(path: str, max_side: int = 768) -> str:
+    buf = io.BytesIO()
+    load_image(path, max_side).save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def ollama_json(prompt: str, images: list[str], model: str, host: str) -> dict:
+    """One Ollama chat call that must answer with a JSON object. think=False keeps
+    reasoning models (qwen3.5) from spending minutes thinking before they answer.
+    No "format": "json" — Ollama's MLX runner rejects it (HTTP 501), so the object is cut out of the text."""
+    body = {"model": model, "stream": False, "think": False,
+            "options": {"temperature": 0},
+            "messages": [{"role": "user", "content": prompt, "images": images}]}
     req = urllib.request.Request(f"{host}/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        text = json.load(r)["message"]["content"]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError(f"no JSON in VLM answer: {text[:200]!r}")
+    return json.loads(text[start:end + 1])
+
+
+def vlm_pick(cands: list[Item], model: str, host: str) -> tuple[int, str] | None:
+    imgs = [_encode(c.path) for c in cands]
+    prompt = (f"You see {len(cands)} very similar photos, numbered 1 to {len(cands)} in the given order. "
+              "Which one should be kept? Consider sharpness, open eyes, facial expression, framing and exposure. "
+              'Answer only as JSON: {"best": <number>, "reason": "<one short sentence>"}')
     try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            data = json.loads(json.load(r)["message"]["content"])
+        data = ollama_json(prompt, imgs, model, host)
         idx = int(data["best"]) - 1
         if 0 <= idx < len(cands):
             return idx, str(data.get("reason", ""))
@@ -479,24 +517,27 @@ end run
 """
 
 
-def tag_photos(keyword: str, uuids: list[str]) -> None:
-    """Gibt genau diesen Fotos das Schlagwort (anderen wird es entzogen); ein intelligentes Album in Fotos zeigt sie an.
+def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
+    """Gibt genau diesen Fotos das Schlagwort; ein intelligentes Album in Fotos zeigt sie an.
+    Patched: the keyword is only removed from photos inside `scope` (this run's date range), so scanning
+    one year at a time no longer wipes earlier years' tags. IDs are sent in batches to stay under ARG_MAX.
     Fotos per Skript in Alben legen geht unter macOS 27 nicht (PhotoKit und AppleScript werden still abgelehnt),
     Schlagwörter setzen schon."""
     import subprocess
 
     def run(mode, ids):
-        if not ids:
-            return 0
-        r = subprocess.run(["osascript", "-", mode, keyword, *ids], input=_KEYWORD_SCRIPT,
-                           text=True, capture_output=True)
-        if r.returncode:
-            log(f"Schlagwort „{keyword}“ ({mode}) fehlgeschlagen: {r.stderr.strip()}")
-            return 0
-        return int(r.stdout.strip() or 0)
+        n = 0
+        for chunk in batched(ids, 500):
+            r = subprocess.run(["osascript", "-", mode, keyword, *chunk], input=_KEYWORD_SCRIPT,
+                               text=True, capture_output=True)
+            if r.returncode:
+                log(f"Schlagwort „{keyword}“ ({mode}) fehlgeschlagen: {r.stderr.strip()}")
+                continue
+            n += int(r.stdout.strip() or 0)
+        return n
 
     old = {p.uuid for p in open_photos_db().photos(keywords=[keyword])}
-    removed = run("remove", sorted(old - set(uuids)))
+    removed = run("remove", sorted((old & scope) - set(uuids)))
     added = run("add", sorted(set(uuids) - old))
     log(f"Schlagwort „{keyword}“: {added} neu, {len(set(uuids) & old)} schon da, {removed} entfernt")
 
@@ -558,12 +599,100 @@ def cmd_scan(args) -> None:
         log(f"Vision-LLM hat in {vlm_used} knappen Gruppen entschieden")
     if args.no_albums:
         log("--no-albums: keine Schlagwörter gesetzt")
-    elif groups:
-        tag_photos(CAND_KEYWORD, cand_uuids)
-        tag_photos(BEST_KEYWORD, best_uuids)
+    elif groups and check_photos_app_library():
+        scope = {p.uuid for p in photos}
+        tag_photos(CAND_KEYWORD, cand_uuids, scope)
+        tag_photos(BEST_KEYWORD, best_uuids, scope)
         log(f"In Fotos: Ablage → Neues intelligentes Album → Schlagwort ist „{CAND_KEYWORD}“ "
             f"(zum Vergleichen: „Beliebige“ Regel + Schlagwort ist „{BEST_KEYWORD}“)")
     log(f"Fertig: {len(best_uuids)} beste Fotos, {len(cand_uuids)} Löschkandidaten. Gelöscht wurde nichts.")
+
+
+# ---------------------------------------------------------------- Added: standalone low-quality photos
+
+LOWQ_KEYWORD = "cleanup_lowq"
+
+_LOWQ_PROMPT = """This photo was taken in {year}{camera}. An automatic quality check flagged it ({flags}).
+Decide whether it is worth keeping in a family photo library.
+Answer "delete" ONLY if it has no value: accidental shot (pocket, floor, ceiling, lens cap), nearly black or white,
+so blurred that nothing is recognisable, or a throwaway screenshot / receipt / document photo.
+Answer "keep" if it shows people, pets, a place or event someone might want to remember, even if it is
+blurry, noisy, low-resolution or badly exposed. Old cameras were bad; judge by content, not technical quality.
+Answer "unsure" if you cannot tell.
+Answer only as JSON: {{"verdict": "delete" | "keep" | "unsure", "reason": "<one short sentence>"}}"""
+
+
+def cmd_lowq(args) -> None:
+    """Flag photos that are low quality on their own (not just the worse shot of a series).
+    Uses the scores `scan` already caches; optionally asks the local VLM to confirm each candidate."""
+    con = open_db()
+    photos = library_photos(args)
+    analyze(con, photos, args)
+    meta = {p.uuid: p for p in photos}
+
+    rows = con.execute("SELECT uuid, ts, path, filename, topiq, laion, apple_aes, is_utility "
+                       "FROM photos WHERE emb IS NOT NULL").fetchall()
+    cands = []
+    for uuid, ts, path, fn, topiq, laion, aes, util in rows:
+        if uuid not in meta:
+            continue
+        flags = []
+        if util:
+            flags.append("utility")  # Apple Vision: screenshot, document, receipt …
+        if topiq is not None and topiq < args.topiq_max:
+            flags.append("low_technical")  # blur, noise, exposure
+        if aes is not None and aes < args.aes_max:
+            flags.append("low_aesthetic")
+        if flags:
+            cands.append(dict(uuid=uuid, ts=ts, path=path, filename=fn, flags=flags,
+                              topiq=topiq, laion=laion, apple_aes=aes))
+    cands.sort(key=lambda c: (c["topiq"] if c["topiq"] is not None else 1.0))
+    log(f"{len(cands)} of {len(meta)} photos flagged "
+        f"(topiq < {args.topiq_max}, apple_aes < {args.aes_max}, or utility)")
+
+    t0 = time.time()
+    for i, c in enumerate(cands, 1):
+        c["verdict"], c["reason"] = ("candidate", "")
+        if not args.vlm:
+            continue
+        p = meta[c["uuid"]]
+        cam = getattr(p.exif_info, "camera_model", None) if p.exif_info else None
+        prompt = _LOWQ_PROMPT.format(year=datetime.fromtimestamp(c["ts"]).year,
+                                     camera=f" with a {cam}" if cam else "", flags=", ".join(c["flags"]))
+        try:
+            d = ollama_json(prompt, [_encode(c["path"])], args.vlm_model, args.ollama)
+            c["verdict"] = str(d.get("verdict", "unsure")).lower()
+            c["reason"] = str(d.get("reason", ""))
+        except Exception as e:  # noqa: BLE001
+            c["verdict"], c["reason"] = "error", str(e)
+        if i % 10 == 0 or i == len(cands):
+            rate = i / max(time.time() - t0, 1e-6)
+            log(f"VLM {i}/{len(cands)} ({rate:.2f} photos/s)")
+
+    run = datetime.now().strftime("%Y-%m-%d %H-%M")
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = REPORT_DIR / f"lowq {run}.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        cols = ["verdict", "reason", "flags", "date", "filename", "topiq", "laion", "apple_aes", "uuid", "path"]
+        w = csv.DictWriter(fh, fieldnames=cols, delimiter=";")
+        w.writeheader()
+        for c in cands:
+            w.writerow({**{k: c[k] for k in cols if k in c}, "flags": ",".join(c["flags"]),
+                        "date": datetime.fromtimestamp(c["ts"]).isoformat(timespec="seconds"),
+                        **{k: None if c[k] is None else round(c[k], 3) for k in ("topiq", "laion", "apple_aes")}})
+    log(f"Report: {csv_path}")
+    counts: dict[str, int] = {}
+    for c in cands:
+        counts[c["verdict"]] = counts.get(c["verdict"], 0) + 1
+    log("Verdicts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    to_tag = [c["uuid"] for c in cands if c["verdict"] in ("delete", "candidate")]
+    if args.no_albums:
+        log("--no-albums: no keywords set")
+    elif check_photos_app_library():
+        tag_photos(LOWQ_KEYWORD, to_tag, set(meta))
+        log(f"In Photos: File → New Smart Album → Keyword is “{LOWQ_KEYWORD}”")
+    log("Nothing was deleted.")
 
 
 # ---------------------------------------------------------------- Stufe 8: Lernen
@@ -615,26 +744,39 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="Ähnliche Fotos finden und das beste auswählen (lokal).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("scan", help="Mediathek analysieren und Alben anlegen")
-    s.add_argument("--since", help="nur Fotos ab Datum (YYYY-MM-DD)")
-    s.add_argument("--until", help="nur Fotos bis Datum (YYYY-MM-DD)")
-    s.add_argument("--limit", type=int, help="nur die neuesten N Fotos")
+    lib = argparse.ArgumentParser(add_help=False)
+    lib.add_argument("--library", help="path to the .photoslibrary (default: the one Photos opened last)")
+
+    common = argparse.ArgumentParser(add_help=False, parents=[lib])
+    common.add_argument("--since", help="nur Fotos ab Datum (YYYY-MM-DD)")
+    common.add_argument("--until", help="nur Fotos bis Datum (YYYY-MM-DD)")
+    common.add_argument("--limit", type=int, help="nur die neuesten N Fotos")
+    common.add_argument("--device", default="auto", help="auto | mps | cpu")
+    common.add_argument("--vlm-model", default="qwen3.5:9b-mlx")
+    common.add_argument("--ollama", default="http://localhost:11434")
+    common.add_argument("--no-albums", action="store_true", help="nur CSV-Bericht, keine Schlagwörter in Fotos")
+
+    s = sub.add_parser("scan", parents=[common], help="similar photos: pick the best, tag the rest")
     s.add_argument("--time-gap", type=float, default=30, help="max. Sekunden zwischen Fotos einer Serie (30)")
     s.add_argument("--sim", type=float, default=0.90, help="Ähnlichkeitsschwelle 0–1 (0.90)")
-    s.add_argument("--device", default="auto", help="auto | mps | cpu")
     s.add_argument("--vlm", action="store_true", help="knappe Gruppen von lokalem Vision-LLM entscheiden lassen")
-    s.add_argument("--vlm-model", default="qwen2.5vl:7b")
     s.add_argument("--vlm-margin", type=float, default=0.08, help="Score-Abstand, ab dem eine Gruppe als knapp gilt")
-    s.add_argument("--ollama", default="http://localhost:11434")
-    s.add_argument("--no-albums", action="store_true", help="nur CSV-Bericht, keine Schlagwörter in Fotos")
     s.set_defaults(func=cmd_scan)
 
-    l = sub.add_parser("learn", help="Gewichte aus deinen Lösch-Entscheidungen lernen")
+    q = sub.add_parser("lowq", parents=[common], help="standalone low-quality photos")
+    q.add_argument("--topiq-max", type=float, default=0.30, help="flag if TOPIQ technical score is below (0.30)")
+    q.add_argument("--aes-max", type=float, default=-0.30, help="flag if Apple aesthetic score is below (-0.30)")
+    q.add_argument("--vlm", action="store_true", help="ask the local VLM to confirm each flagged photo")
+    q.set_defaults(func=cmd_lowq)
+
+    l = sub.add_parser("learn", parents=[lib], help="Gewichte aus deinen Lösch-Entscheidungen lernen")
     l.set_defaults(func=cmd_learn)
 
     args = ap.parse_args(argv)
     if sys.platform != "darwin":
         sys.exit("Dieses Skript läuft nur auf macOS (Fotos-Mediathek).")
+    global LIBRARY
+    LIBRARY = args.library
     args.func(args)
 
 
