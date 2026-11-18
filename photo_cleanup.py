@@ -22,6 +22,7 @@ import base64
 import csv
 import io
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -32,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-HOME = Path.home() / ".photo_cleanup"
+HOME = Path(os.environ.get("PHOTO_CLEANUP_HOME") or Path.home() / ".photo_cleanup")
 DB_PATH = HOME / "cache.sqlite"
 WEIGHTS_PATH = HOME / "weights.json"
 REPORT_DIR = HOME / "reports"
@@ -517,7 +518,7 @@ end run
 """
 
 
-def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
+def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> dict:
     """Give exactly these photos the keyword; a smart album in Photos shows them.
     The keyword is only removed from photos inside `scope` (this run's date range), so scanning
     one year at a time doesn't wipe earlier years' tags. IDs are sent in batches to stay under ARG_MAX.
@@ -539,7 +540,9 @@ def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
     old = {p.uuid for p in open_photos_db().photos(keywords=[keyword])}
     removed = run("remove", sorted((old & scope) - set(uuids)))
     added = run("add", sorted(set(uuids) - old))
-    log(f"Keyword “{keyword}”: {added} added, {len(set(uuids) & old)} already present, {removed} removed")
+    present = len(set(uuids) & old)
+    log(f"Keyword “{keyword}”: {added} added, {present} already present, {removed} removed")
+    return {"added": added, "present": present, "removed": removed}
 
 
 def cmd_scan(args) -> None:
@@ -740,6 +743,13 @@ def cmd_learn(args) -> None:
 
 # ---------------------------------------------------------------- CLI
 
+def cmd_serve(args) -> None:
+    import review_server
+    # Hand over this module object: when run as a script it is __main__, and a plain
+    # `import photo_cleanup` inside review_server would create a second copy with its own LIBRARY.
+    review_server.serve(sys.modules[__name__], args)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description="Find similar photos and pick the best one (local).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -771,6 +781,12 @@ def main(argv=None) -> None:
 
     l = sub.add_parser("learn", parents=[lib], help="learn weights from your deletion decisions")
     l.set_defaults(func=cmd_learn)
+
+    v = sub.add_parser("serve", parents=[lib], help="web UI to review a report and approve deletions")
+    v.add_argument("report", nargs="?", help="report CSV path or file name (default: the newest report)")
+    v.add_argument("--port", type=int, default=8765)
+    v.add_argument("--no-open", action="store_true", help="don't open the browser")
+    v.set_defaults(func=cmd_serve)
 
     args = ap.parse_args(argv)
     if sys.platform != "darwin":

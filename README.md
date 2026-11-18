@@ -12,11 +12,27 @@ Runs entirely locally on your Mac. Reads your Apple Photos library, groups simil
 - **VLM:** English prompts, `think: false`, JSON parsed from the reply text (Ollama's MLX runner rejects `format: json`), default model `qwen3.5:9b-mlx`.
 - **uv-managed:** `uv sync`, then `uv run photo_cleanup.py …`.
 - **English throughout:** log output, CSV columns, keywords and docs.
+- **Review UI (`serve`):** a local web page to go through a report and decide per photo. See [Reviewing in the browser](#reviewing-in-the-browser).
 
 ```bash
 uv run photo_cleanup.py scan --library "/Volumes/<drive>/<name>.photoslibrary" --limit 500 --no-albums
 uv run photo_cleanup.py lowq --library "/Volumes/<drive>/<name>.photoslibrary" --limit 500 --no-albums --vlm
+uv run photo_cleanup.py serve --library "/Volumes/<drive>/<name>.photoslibrary"
 ```
+
+## Reviewing in the browser
+
+```bash
+uv run photo_cleanup.py serve [REPORT] [--library PATH] [--port 8765] [--no-open]
+```
+
+Opens `http://127.0.0.1:8765/` (local only) with the given report, or the newest one in `~/.photo_cleanup/reports/` if none is given; other reports can be picked from the menu. Both `scan` reports (shown as groups, best shot marked) and `lowq` reports work.
+
+- **Select:** click, ⌘-click to add, ⇧-click for a range, or drag a box over several photos (hold ⌘/⇧ to add to the selection). ⌘A selects everything shown, Esc clears, "Select suggested" picks every photo the tool suggests deleting.
+- **Decide:** **D** approve deletion, **K** keep, **R** reset to undecided. Space or double-click opens a large preview (←/→ to browse, D/K/R work there too). Filters show suggested, unsure, undecided, approved or kept photos.
+- Decisions are saved as you go to `<report>.decisions.json` next to the report, so you can stop and continue later.
+- **Apply approved…** tags exactly the approved photos with the keyword `cleanup_delete` (and removes it from photos in this report you no longer approve). It needs `--library` and refuses to run unless the Photos app has that same library open. Photos doesn't let scripts delete photos, so finish in Photos: smart album "Keyword is cleanup_delete" → select all → ⌘⌫. The photos go to Recently Deleted for 30 days.
+- Thumbnails are made from the paths in the analysis cache and kept in `~/.photo_cleanup/thumbs/`. The library's drive must be mounted.
 
 ## Setup (one time)
 

@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Cleanup Review</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #dcdcd8;
+  --accent: #2f6fde; --accent-soft: rgba(47,111,222,.16);
+  --del: #d6453d; --del-soft: rgba(214,69,61,.14); --keep: #2e8b57; --keep-soft: rgba(46,139,87,.14);
+  --unsure: #c78a12; --card-w: 200px;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161617; --panel: #222224; --text: #f2f2f2; --muted: #9a9aa0; --line: #38383b;
+          --accent: #5b8ff0; --accent-soft: rgba(91,143,240,.22);
+          --del: #ef6a62; --del-soft: rgba(239,106,98,.18); --keep: #4fbf80; --keep-soft: rgba(79,191,128,.18);
+          --unsure: #e0a93a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+       background: var(--bg); color: var(--text); }
+header { position: sticky; top: 0; z-index: 20; background: var(--panel); border-bottom: 1px solid var(--line);
+         padding: 10px 16px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+select, button, input[type=range] { font: inherit; color: inherit; }
+select { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 320px; }
+button { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--del); border-color: var(--del); color: #fff; font-weight: 600; }
+button.del { color: var(--del); } button.keep { color: var(--keep); }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px;
+      border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { border-radius: 999px; padding: 3px 10px; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip .n { opacity: .75; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+#selinfo { font-variant-numeric: tabular-nums; min-width: 90px; }
+main { padding: 12px 16px 80px; user-select: none; -webkit-user-select: none; min-height: calc(100vh - 100px); }
+.group { margin: 0 0 14px; padding: 8px 10px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.group h2 { font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+.warn { color: var(--del); font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-w), 1fr)); gap: 10px; }
+.card { position: relative; border-radius: 8px; background: var(--panel); border: 2px solid var(--line);
+        overflow: hidden; cursor: default; transition: border-color .08s; }
+.group .card { background: var(--bg); }
+.card .img { position: relative; aspect-ratio: 4/3; background: var(--line); display: flex; align-items: center; justify-content: center; }
+.card img { width: 100%; height: 100%; object-fit: contain; display: block; pointer-events: none; }
+.card .img .missing { color: var(--muted); font-size: 11px; }
+.card .meta { padding: 5px 7px 7px; }
+.card .fn { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .reason { font-size: 11px; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.badges { position: absolute; top: 5px; left: 5px; display: flex; gap: 4px; flex-wrap: wrap; }
+.badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; }
+.badge.s-delete { background: var(--del); } .badge.s-keep { background: var(--keep); } .badge.s-unsure { background: var(--unsure); }
+.state { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+         font-weight: 700; font-size: 15px; letter-spacing: .02em; }
+.card.d-delete { border-color: var(--del); } .card.d-delete .state { display: flex; background: var(--del-soft); color: var(--del); }
+.card.d-keep { border-color: var(--keep); } .card.d-keep .state { display: flex; background: var(--keep-soft); color: var(--keep); }
+.card.d-delete .state::after { content: "DELETE"; background: var(--panel); padding: 2px 8px; border-radius: 6px; }
+.card.d-keep .state::after { content: "KEEP"; background: var(--panel); padding: 2px 8px; border-radius: 6px; }
+.card.sel { box-shadow: 0 0 0 3px var(--accent); }
+.card.sel::after { content: "✓"; position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; border-radius: 50%;
+                   background: var(--accent); color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+#marquee { position: absolute; border: 1px solid var(--accent); background: var(--accent-soft); pointer-events: none; z-index: 30; display: none; }
+#empty { text-align: center; color: var(--muted); padding: 60px 0; }
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+.modal-bg.open { display: flex; }
+.modal { background: var(--panel); border-radius: 12px; padding: 18px 20px; max-width: 520px; width: 100%; }
+.modal h3 { margin: 0 0 8px; font-size: 16px; }
+.modal ol { padding-left: 20px; margin: 8px 0; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+code { font: 12px ui-monospace, monospace; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+#lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.88); z-index: 60; display: none; flex-direction: column; align-items: center; justify-content: center; color: #eee; }
+#lightbox.open { display: flex; }
+#lightbox img { max-width: 94vw; max-height: 82vh; object-fit: contain; }
+#lightbox .cap { margin-top: 10px; text-align: center; max-width: 90vw; }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+         padding: 8px 14px; border-radius: 8px; display: none; z-index: 70; max-width: 90vw; }
+.help { font-size: 11px; }
+@media (max-width: 640px) { :root { --card-w: 140px; } .help { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="row">
+    <h1>Photo Cleanup Review</h1>
+    <select id="report" aria-label="Report"></select>
+    <span id="kind" class="muted"></span>
+    <span class="spacer"></span>
+    <label class="muted">Size <input id="size" type="range" min="120" max="360" value="200"></label>
+    <button id="apply" class="primary" disabled>Apply approved…</button>
+  </div>
+  <div class="row">
+    <div class="chips" id="filters"></div>
+    <span class="spacer"></span>
+    <span id="selinfo" class="muted">0 selected</span>
+    <button id="b-del" class="del" disabled>Approve delete <kbd>D</kbd></button>
+    <button id="b-keep" class="keep" disabled>Keep <kbd>K</kbd></button>
+    <button id="b-reset" disabled>Reset <kbd>R</kbd></button>
+    <button id="b-sugg">Select suggested</button>
+  </div>
+  <div class="row help muted">Click to select · ⌘-click to add · ⇧-click for a range · drag a box to select many (hold ⌘/⇧ to add) · ⌘A all · Esc clear · Space / double-click to preview</div>
+</header>
+<main id="main"><div id="empty">Loading…</div></main>
+<div id="marquee"></div>
+
+<div class="modal-bg" id="apply-modal">
+  <div class="modal">
+    <h3>Apply <span id="ap-n">0</span> approved deletions?</h3>
+    <p>This tags the approved photos in Photos with the keyword <code id="ap-kw">cleanup_delete</code>, and removes that keyword from photos in this report you no longer approve. Nothing is deleted yet: Photos doesn't let scripts delete photos.</p>
+    <p>Then, in Photos:</p>
+    <ol>
+      <li>File → New Smart Album → “Keyword is <code class="kw">cleanup_delete</code>” (once).</li>
+      <li>Open it, check it, select all (⌘A), press ⌘⌫.</li>
+      <li>The photos go to Recently Deleted, where they stay recoverable for 30 days.</li>
+    </ol>
+    <p id="ap-result" class="muted"></p>
+    <div class="actions"><button id="ap-cancel">Cancel</button><button id="ap-go" class="primary">Tag in Photos</button></div>
+  </div>
+</div>
+
+<div id="lightbox"><img id="lb-img" alt=""><div class="cap" id="lb-cap"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const state = {
+  report: null, kind: null, items: [], byId: new Map(), decisions: {}, filter: "all",
+  sel: new Set(), anchor: null, order: [], cards: new Map(), pending: {}, saveTimer: null, lb: null,
+};
+const FILTERS = [
+  ["all", "All", () => true],
+  ["suggested", "Suggested delete", (it) => it.suggestion === "delete"],
+  ["unsure", "Unsure", (it) => it.suggestion === "unsure"],
+  ["pending", "Undecided", (it) => !state.decisions[it.uuid]],
+  ["delete", "Approved", (it) => state.decisions[it.uuid] === "delete"],
+  ["keep", "Kept", (it) => state.decisions[it.uuid] === "keep"],
+];
+
+function toast(msg, ms = 2600) {
+  const t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = "none"), ms);
+}
+async function api(path, body) {
+  const opt = body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ---------------------------------------------------------------- loading
+async function loadReports() {
+  const { reports, initial } = await api("/api/reports");
+  const sel = $("#report"); sel.innerHTML = "";
+  for (const r of reports) {
+    const o = document.createElement("option");
+    o.value = r.name; o.textContent = `${r.name}${r.mtime ? "  ·  " + r.mtime.replace("T", " ") : ""}`;
+    sel.append(o);
+  }
+  const want = new URLSearchParams(location.search).get("report") || initial;
+  if (want) sel.value = want;
+  if (!reports.length) { $("#empty").textContent = "No reports yet. Run `scan` or `lowq` first."; return; }
+  await loadReport(sel.value);
+}
+async function loadReport(name) {
+  await flushSave();
+  const d = await api("/api/report?name=" + encodeURIComponent(name));
+  Object.assign(state, { report: d.name, kind: d.kind, items: d.items, decisions: d.decisions || {},
+                         sel: new Set(), anchor: null });
+  state.byId = new Map(d.items.map((it) => [it.uuid, it]));
+  document.querySelectorAll(".kw, #ap-kw").forEach((e) => (e.textContent = d.keyword));
+  const n = d.items.length;
+  $("#kind").textContent = (d.kind === "scan" ? "Similar-photo groups" : "Low-quality photos") + ` · ${n} photos` +
+    (d.applied ? ` · last applied ${d.applied.at.replace("T", " ")} (${d.applied.count})` : "");
+  history.replaceState(null, "", "?report=" + encodeURIComponent(d.name));
+  render();
+}
+
+// ---------------------------------------------------------------- rendering
+function fmt(v, d = 2) { return v == null ? "–" : Number(v).toFixed(d); }
+function cardEl(it) {
+  const c = document.createElement("div");
+  c.className = "card"; c.dataset.uuid = it.uuid;
+  const sc = it.scores || {};
+  const badges = [`<span class="badge s-${it.suggestion}">${it.suggestion === "delete" ? "suggest delete" : it.suggestion}</span>`];
+  if (it.best) badges.push(`<span class="badge">★ best</span>`);
+  for (const f of it.flags || []) badges.push(`<span class="badge">${f.replace("_", " ")}</span>`);
+  c.innerHTML = `
+    <div class="img"><img loading="lazy" draggable="false" alt=""><div class="badges">${badges.join("")}</div><div class="state"></div></div>
+    <div class="meta">
+      <div class="fn"></div>
+      <div class="sub">${(it.date || "").replace("T", " ")} · topiq ${fmt(sc.topiq)} · aes ${fmt(sc.apple_aes)}${sc.score != null ? " · score " + fmt(sc.score) : ""}</div>
+      ${it.reason ? `<div class="reason"></div>` : ""}
+    </div>`;
+  c.querySelector(".fn").textContent = it.filename || it.uuid;
+  c.querySelector(".fn").title = it.filename || "";
+  if (it.reason) { const r = c.querySelector(".reason"); r.textContent = it.reason; r.title = it.reason; }
+  const img = c.querySelector("img");
+  img.src = "/thumb/" + encodeURIComponent(it.uuid) + "?size=s";
+  img.onerror = () => { img.remove(); c.querySelector(".img").insertAdjacentHTML("afterbegin", '<span class="missing">no preview (drive unmounted?)</span>'); };
+  return c;
+}
+function render() {
+  const main = $("#main"); main.innerHTML = "";
+  state.cards.clear(); state.order = [];
+  const f = FILTERS.find((x) => x[0] === state.filter)[2];
+  const visible = state.items.filter(f);
+  if (!visible.length) { main.innerHTML = '<div id="empty">Nothing matches this filter.</div>'; updateUI(); return; }
+  if (state.kind === "scan") {
+    const groups = new Map();
+    for (const it of visible) { if (!groups.has(it.group)) groups.set(it.group, []); groups.get(it.group).push(it); }
+    const frag = document.createDocumentFragment();
+    for (const [g, its] of groups) {
+      its.sort((a, b) => a.rank - b.rank);
+      const sec = document.createElement("section"); sec.className = "group"; sec.dataset.group = g;
+      const total = state.items.filter((x) => x.group === g).length;
+      const close = its.some((x) => (x.flags || []).includes("close"));
+      sec.innerHTML = `<h2>Group ${g} · ${total} photos${close ? " · close call" : ""}<span class="warn"></span></h2><div class="grid"></div>`;
+      const grid = sec.querySelector(".grid");
+      for (const it of its) { const c = cardEl(it); grid.append(c); state.cards.set(it.uuid, c); state.order.push(it.uuid); }
+      frag.append(sec);
+    }
+    main.append(frag);
+  } else {
+    const grid = document.createElement("div"); grid.className = "grid";
+    for (const it of visible) { const c = cardEl(it); grid.append(c); state.cards.set(it.uuid, c); state.order.push(it.uuid); }
+    main.append(grid);
+  }
+  for (const u of [...state.sel]) if (!state.cards.has(u)) state.sel.delete(u);
+  state.cards.forEach((_, u) => paint(u));
+  updateUI();
+}
+function paint(u) {
+  const c = state.cards.get(u); if (!c) return;
+  const d = state.decisions[u];
+  c.classList.toggle("d-delete", d === "delete");
+  c.classList.toggle("d-keep", d === "keep");
+  c.classList.toggle("sel", state.sel.has(u));
+}
+function updateUI() {
+  const counts = Object.fromEntries(FILTERS.map(([k, , fn]) => [k, state.items.filter(fn).length]));
+  const box = $("#filters"); box.innerHTML = "";
+  for (const [k, label] of FILTERS) {
+    const b = document.createElement("button");
+    b.className = "chip" + (state.filter === k ? " on" : "");
+    b.innerHTML = `${label}<span class="n">${counts[k]}</span>`;
+    b.onclick = () => { state.filter = k; render(); };
+    box.append(b);
+  }
+  const n = state.sel.size;
+  $("#selinfo").textContent = `${n} selected`;
+  for (const id of ["#b-del", "#b-keep", "#b-reset"]) $(id).disabled = n === 0;
+  const approved = counts.delete;
+  $("#apply").disabled = !state.report;
+  $("#apply").textContent = `Apply ${approved} approved…`;
+  if (state.kind === "scan") {   // warn when every photo of a group is marked for deletion
+    document.querySelectorAll("section.group").forEach((sec) => {
+      const g = Number(sec.dataset.group);
+      const all = state.items.filter((x) => x.group === g);
+      sec.querySelector(".warn").textContent = all.every((x) => state.decisions[x.uuid] === "delete") ? "· all photos marked for deletion" : "";
+    });
+  }
+}
+
+// ---------------------------------------------------------------- decisions
+function decide(uuids, value) {
+  if (!uuids.length) return;
+  for (const u of uuids) {
+    if (value) state.decisions[u] = value; else delete state.decisions[u];
+    state.pending[u] = value || null;
+  }
+  const f = FILTERS.find((x) => x[0] === state.filter)[2];
+  if (state.filter !== "all" && uuids.some((u) => !f(state.byId.get(u)))) render();   // items left this filter
+  else { uuids.forEach(paint); updateUI(); }
+  scheduleSave();
+}
+function scheduleSave() { clearTimeout(state.saveTimer); state.saveTimer = setTimeout(flushSave, 400); }
+async function flushSave() {
+  clearTimeout(state.saveTimer);
+  const changes = state.pending; state.pending = {};
+  if (!state.report || !Object.keys(changes).length) return;
+  try { await api("/api/decisions", { name: state.report, changes }); }
+  catch (e) { Object.assign(state.pending, changes); toast("Saving failed: " + e.message, 5000); }
+}
+window.addEventListener("beforeunload", () => {
+  if (Object.keys(state.pending).length)
+    fetch("/api/decisions", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: state.report, changes: state.pending }) });
+});
+
+// ---------------------------------------------------------------- selection
+function setSel(set) {
+  const old = state.sel; state.sel = set;
+  for (const u of old) if (!set.has(u)) paint(u);
+  for (const u of set) if (!old.has(u)) paint(u);
+  updateUI();
+}
+function clickCard(u, e) {
+  if (e.shiftKey && state.anchor && state.cards.has(state.anchor)) {
+    const a = state.order.indexOf(state.anchor), b = state.order.indexOf(u);
+    const range = state.order.slice(Math.min(a, b), Math.max(a, b) + 1);
+    const s = (e.metaKey || e.ctrlKey) ? new Set(state.sel) : new Set();
+    range.forEach((x) => s.add(x)); setSel(s); return;
+  }
+  if (e.metaKey || e.ctrlKey) {
+    const s = new Set(state.sel); s.has(u) ? s.delete(u) : s.add(u); setSel(s);
+  } else setSel(new Set([u]));
+  state.anchor = u;
+}
+
+// Marquee: press anywhere in the content (also on a card) and move > 4px to draw a box.
+const drag = { on: false, active: false, x0: 0, y0: 0, x: 0, y: 0, base: null, rects: null, raf: 0, cy: 0, target: null, ev: null };
+const marquee = $("#marquee");
+$("#main").addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  Object.assign(drag, { on: true, active: false, x0: e.pageX, y0: e.pageY, x: e.pageX, y: e.pageY, cy: e.clientY,
+                        target: e.target.closest(".card"), ev: e });
+});
+window.addEventListener("pointermove", (e) => {
+  if (!drag.on) return;
+  drag.x = e.pageX; drag.y = e.pageY; drag.cy = e.clientY;
+  if (!drag.active && Math.hypot(drag.x - drag.x0, drag.y - drag.y0) > 4) {
+    drag.active = true;
+    drag.base = (e.metaKey || e.ctrlKey || e.shiftKey) ? new Set(state.sel) : new Set();
+    drag.rects = [...state.cards].map(([u, c]) => {
+      const r = c.getBoundingClientRect();
+      return [u, r.left + scrollX, r.top + scrollY, r.right + scrollX, r.bottom + scrollY];
+    });
+    marquee.style.display = "block";
+    drag.raf = requestAnimationFrame(autoscroll);
+  }
+  if (drag.active) updateMarquee();
+});
+function updateMarquee() {
+  const l = Math.min(drag.x0, drag.x), t = Math.min(drag.y0, drag.y), r = Math.max(drag.x0, drag.x), b = Math.max(drag.y0, drag.y);
+  Object.assign(marquee.style, { left: l + "px", top: t + "px", width: r - l + "px", height: b - t + "px" });
+  const s = new Set(drag.base);
+  for (const [u, L, T, R, B] of drag.rects) if (L < r && R > l && T < b && B > t) s.add(u);
+  setSel(s);
+}
+function autoscroll() {
+  if (!drag.active) return;
+  const edge = 50, top = $("header").getBoundingClientRect().bottom;
+  let dy = 0;
+  if (drag.cy < top + edge) dy = -Math.ceil((top + edge - drag.cy) / 4);
+  else if (drag.cy > innerHeight - edge) dy = Math.ceil((drag.cy - innerHeight + edge) / 4);
+  if (dy) { const before = scrollY; scrollBy(0, dy); drag.y += scrollY - before; updateMarquee(); }
+  drag.raf = requestAnimationFrame(autoscroll);
+}
+window.addEventListener("pointerup", (e) => {
+  if (!drag.on) return;
+  const wasActive = drag.active;
+  drag.on = false; drag.active = false; cancelAnimationFrame(drag.raf); marquee.style.display = "none";
+  if (wasActive) { state.anchor = null; return; }
+  if (drag.target) clickCard(drag.target.dataset.uuid, e);
+  else if (!(e.metaKey || e.ctrlKey || e.shiftKey)) setSel(new Set());
+});
+$("#main").addEventListener("dblclick", (e) => { const c = e.target.closest(".card"); if (c) openLightbox(c.dataset.uuid); });
+
+// ---------------------------------------------------------------- lightbox
+function openLightbox(u) {
+  state.lb = u; const it = state.byId.get(u);
+  $("#lb-img").src = "/thumb/" + encodeURIComponent(u) + "?size=l";
+  const d = state.decisions[u];
+  $("#lb-cap").textContent = `${it.filename} · ${(it.date || "").replace("T", " ")} · suggested: ${it.suggestion}` +
+    `${d ? " · your decision: " + d : ""}${it.reason ? " — " + it.reason : ""}   (←/→ browse · D/K/R decide · Esc close)`;
+  $("#lightbox").classList.add("open");
+  setSel(new Set([u])); state.anchor = u;
+}
+function closeLightbox() { state.lb = null; $("#lightbox").classList.remove("open"); }
+$("#lightbox").addEventListener("click", closeLightbox);
+
+// ---------------------------------------------------------------- keyboard & buttons
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("select, input") || $("#apply-modal").classList.contains("open")) return;
+  const k = e.key.toLowerCase();
+  if (state.lb) {
+    const i = state.order.indexOf(state.lb);
+    if (k === "escape" || k === " ") { e.preventDefault(); closeLightbox(); }
+    else if (k === "arrowright" && i < state.order.length - 1) openLightbox(state.order[i + 1]);
+    else if (k === "arrowleft" && i > 0) openLightbox(state.order[i - 1]);
+    else if (k === "d" || k === "k" || k === "r") {
+      decide([state.lb], { d: "delete", k: "keep", r: null }[k]);
+      if (state.byId.has(state.lb) && state.cards.has(state.lb)) openLightbox(state.lb); else closeLightbox();
+    }
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && k === "a") { e.preventDefault(); setSel(new Set(state.order)); }
+  else if (k === "escape") setSel(new Set());
+  else if (k === "d") decide([...state.sel], "delete");
+  else if (k === "k") decide([...state.sel], "keep");
+  else if (k === "r") decide([...state.sel], null);
+  else if (k === " " && state.sel.size) { e.preventDefault(); openLightbox(state.anchor && state.sel.has(state.anchor) ? state.anchor : [...state.sel][0]); }
+});
+$("#b-del").onclick = () => decide([...state.sel], "delete");
+$("#b-keep").onclick = () => decide([...state.sel], "keep");
+$("#b-reset").onclick = () => decide([...state.sel], null);
+$("#b-sugg").onclick = () => setSel(new Set(state.order.filter((u) => state.byId.get(u).suggestion === "delete")));
+$("#report").onchange = (e) => loadReport(e.target.value).catch((err) => toast(err.message, 5000));
+$("#size").oninput = (e) => document.documentElement.style.setProperty("--card-w", e.target.value + "px");
+
+$("#apply").onclick = async () => {
+  await flushSave();
+  $("#ap-n").textContent = Object.values(state.decisions).filter((v) => v === "delete").length;
+  $("#ap-result").textContent = "";
+  Object.assign($("#ap-go"), { disabled: false, textContent: "Tag in Photos", onclick: doApply });
+  $("#apply-modal").classList.add("open");
+};
+$("#ap-cancel").onclick = () => $("#apply-modal").classList.remove("open");
+async function doApply() {
+  $("#ap-go").disabled = true; $("#ap-result").textContent = "Tagging in Photos… (reading the library can take a minute)";
+  try {
+    const r = await api("/api/apply", { name: state.report });
+    if (!r.ok) { $("#ap-result").textContent = "Not applied: " + r.error; $("#ap-go").disabled = false; return; }
+    $("#ap-result").textContent = `Done: ${r.approved} approved · ${r.added} newly tagged · ${r.present} already tagged · ${r.removed} untagged. Now finish in Photos.`;
+    $("#ap-go").textContent = "Done"; $("#ap-go").onclick = () => $("#apply-modal").classList.remove("open"); $("#ap-go").disabled = false;
+  } catch (e) { $("#ap-result").textContent = "Error: " + e.message; $("#ap-go").disabled = false; }
+}
+
+loadReports().catch((e) => { $("#main").innerHTML = `<div id="empty">${e.message}</div>`; });
+</script>
+</body>
+</html>
