@@ -14,7 +14,7 @@ dependencies = [
     "torchvision",
     "transformers",
     "pyiqa",
-    "setuptools<81", # pyiqa (laion_aes) braucht pkg_resources
+    "setuptools<81", # pyiqa (laion_aes) needs pkg_resources
     "pyobjc-framework-Vision",
     "scikit-learn",
 ]

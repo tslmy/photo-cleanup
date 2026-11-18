@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-photo_cleanup.py – lokale Pipeline zum Aufräumen der Apple-Fotos-Mediathek (macOS).
+photo_cleanup.py – local pipeline for tidying up an Apple Photos library (macOS).
 
-Stufen:
-  1. Index         osxphotos liest die Mediathek, Ergebnisse werden in SQLite gecacht (inkrementell)
-  2. Embeddings    SigLIP-Bildvektoren für die Ähnlichkeit
-  3. Gruppieren    Zeitfenster + Cosinus-Ähnlichkeit
-  4. Qualität      TOPIQ (technisch), LAION (Ästhetik), Apple Vision (Ästhetik, Gesichter, Augen)
-  5. Ranking       gewichtete Summe, innerhalb jeder Gruppe normalisiert
-  6. Schiedsrichter lokales Vision-LLM über Ollama, nur bei knappen Gruppen (optional, --vlm)
-  7. Ausgabe       Schlagwörter "bestes_foto" + "loeschkandidat" und CSV-Bericht.
-                   Es wird NICHTS gelöscht – das machst du selbst in Fotos.
-  8. Lernen        `learn` prüft, welche Kandidaten du wirklich gelöscht hast, und passt die Gewichte an.
+Stages:
+  1. Index         osxphotos reads the library; results are cached in SQLite (incremental)
+  2. Embeddings    SigLIP image vectors for similarity
+  3. Grouping      time window + cosine similarity
+  4. Quality       TOPIQ (technical), LAION (aesthetics), Apple Vision (aesthetics, faces, eyes)
+  5. Ranking       weighted sum, normalized within each group
+  6. Tie-breaker   local vision LLM via Ollama, only for close groups (optional, --vlm)
+  7. Output        keywords "cleanup_best" + "cleanup_candidate" and a CSV report.
+                   NOTHING is deleted – you do that yourself in Photos.
+  8. Learning      `learn` checks which candidates you actually deleted and adjusts the weights.
 
-Jede Stufe degradiert sauber: Fehlt ein Modell, wird das Merkmal ignoriert statt abzubrechen.
+Every stage degrades gracefully: if a model is missing, its feature is ignored instead of aborting.
 """
 from __future__ import annotations
 
@@ -39,18 +39,18 @@ REPORT_DIR = HOME / "reports"
 
 FEATURES = ["topiq", "laion", "apple_aes", "face_q", "eyes"]
 DEFAULT_WEIGHTS = {"topiq": 0.35, "laion": 0.20, "apple_aes": 0.15, "face_q": 0.15, "eyes": 0.15}
-EYES_CLOSED = 0.5          # eyes-Score < 0.5 ≈ Auge halb/ganz geschlossen
-BLINK_PENALTY = 0.20       # Abzug, wenn jemand blinzelt
-EYE_OPEN_EAR = 0.30        # Höhe/Breite eines offenen Auges (≈ 1.0 im eyes-Score)
+EYES_CLOSED = 0.5          # eyes score < 0.5 ≈ eye half or fully closed
+BLINK_PENALTY = 0.20       # penalty when someone blinks
+EYE_OPEN_EAR = 0.30        # height/width of an open eye (≈ 1.0 in the eyes score)
 
-try:  # HEIC-Unterstützung für Pillow
+try:  # HEIC support for Pillow
     import pillow_heif
     pillow_heif.register_heif_opener()
 except ImportError:
     pass
 
 
-# ---------------------------------------------------------------- Hilfsfunktionen
+# ---------------------------------------------------------------- Helpers
 
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
@@ -80,10 +80,10 @@ def load_image(path: str, max_side: int = 768):
 
 
 def best_local_path(photo) -> str | None:
-    """Lokale Vorschau bevorzugen (schnell, JPEG). Original nur, wenn keine brauchbare Vorschau da ist.
-    Fotos, die nur in iCloud liegen und keine lokale Vorschau haben, werden übersprungen."""
+    """Prefer a local preview (fast, JPEG). Use the original only when no usable preview exists.
+    Photos that live only in iCloud and have no local preview are skipped."""
     derivs = [d for d in (photo.path_derivatives or []) if d and Path(d).exists()]
-    for d in derivs:  # osxphotos sortiert groß -> klein
+    for d in derivs:  # osxphotos sorts large -> small
         if Path(d).stat().st_size > 60_000:
             return d
     if photo.path and Path(photo.path).exists():
@@ -91,7 +91,7 @@ def best_local_path(photo) -> str | None:
     return derivs[0] if derivs else None
 
 
-# ---------------------------------------------------------------- Datenbank
+# ---------------------------------------------------------------- Database
 
 def open_db() -> sqlite3.Connection:
     HOME.mkdir(parents=True, exist_ok=True)
@@ -115,10 +115,10 @@ def load_weights() -> dict:
     return dict(DEFAULT_WEIGHTS)
 
 
-# ---------------------------------------------------------------- Modelle
+# ---------------------------------------------------------------- Models
 
 class Embedder:
-    """SigLIP-Bildembeddings (normalisiert) für die Ähnlichkeitssuche."""
+    """SigLIP image embeddings (normalized) for similarity search."""
 
     def __init__(self, device: str, model_name: str = "google/siglip-base-patch16-224"):
         import torch
@@ -132,14 +132,14 @@ class Embedder:
         with self.torch.no_grad():
             inp = self.proc(images=images, return_tensors="pt").to(self.device)
             f = self.model.get_image_features(**inp)
-            if not isinstance(f, self.torch.Tensor):  # transformers 5 liefert ein Output-Objekt
+            if not isinstance(f, self.torch.Tensor):  # transformers 5 returns an output object
                 f = f.pooler_output
             f = f / f.norm(dim=-1, keepdim=True)
         return f.float().cpu().numpy().astype(np.float32)
 
 
 class IQA:
-    """Bildqualität über pyiqa: TOPIQ (technisch) + LAION (Ästhetik). Fällt bei MPS-Problemen auf CPU zurück."""
+    """Image quality via pyiqa: TOPIQ (technical) + LAION (aesthetics). Falls back to CPU on MPS problems."""
 
     def __init__(self, device: str):
         self.metrics = {}
@@ -150,7 +150,7 @@ class IQA:
             self.TF = TF
             self.pyiqa = pyiqa
         except ImportError:
-            log("pyiqa nicht installiert – TOPIQ/LAION werden übersprungen")
+            log("pyiqa not installed – skipping TOPIQ/LAION")
             return
         for key, name in self.names.items():
             for dev in dict.fromkeys([device, "cpu"]):
@@ -158,7 +158,7 @@ class IQA:
                     self.metrics[key] = pyiqa.create_metric(name, device=dev)
                     break
                 except Exception as e:  # noqa: BLE001
-                    log(f"{name} auf {dev} nicht verfügbar: {e}")
+                    log(f"{name} not available on {dev}: {e}")
 
     def __call__(self, im) -> dict:
         out = {"topiq": None, "laion": None}
@@ -169,15 +169,15 @@ class IQA:
             try:
                 out[key] = float(m(t.to(m.device)).item())
             except Exception as e:  # noqa: BLE001
-                if str(m.device) != "cpu":  # z. B. fehlende MPS-Ops: auf CPU weiter
-                    log(f"{key} auf {m.device} fehlgeschlagen – weiter auf CPU")
+                if str(m.device) != "cpu":  # e.g. missing MPS ops: continue on CPU
+                    log(f"{key} failed on {m.device} – continuing on CPU")
                     try:
                         m = self.metrics[key] = self.pyiqa.create_metric(self.names[key], device="cpu")
                         out[key] = float(m(t).item())
                         continue
                     except Exception as e2:  # noqa: BLE001
                         e = e2
-                log(f"{key} fehlgeschlagen ({e}) – Merkmal wird deaktiviert")
+                log(f"{key} failed ({e}) – disabling feature")
                 self.metrics.pop(key)
         return out
 
@@ -201,7 +201,7 @@ def _eye_ratio(points) -> float | None:
 
 
 def apple_vision_scores(path: str) -> dict:
-    """Apple Vision über PyObjC: Ästhetik-Score (macOS 15+), Gesichtsqualität, Augenöffnung."""
+    """Apple Vision via PyObjC: aesthetics score (macOS 15+), face capture quality, eye openness."""
     out = {"apple_aes": None, "is_utility": None, "face_q": None, "eyes": None, "faces": 0}
     try:
         import Vision
@@ -233,7 +233,7 @@ def apple_vision_scores(path: str) -> dict:
         if qs:
             out["face_q"] = float(np.mean(qs))
 
-        # Augen: schlechtestes Gesicht zählt (einer blinzelt = Foto schlechter)
+        # Eyes: the worst face counts (one person blinking = worse photo)
         worst = None
         for o in (lm_req.results() or []):
             lm = o.landmarks()
@@ -248,11 +248,11 @@ def apple_vision_scores(path: str) -> dict:
                 worst = score if worst is None else min(worst, score)
         out["eyes"] = worst
     except Exception as e:  # noqa: BLE001
-        log(f"Vision-Fehler bei {Path(path).name}: {e}")
+        log(f"Vision error on {Path(path).name}: {e}")
     return out
 
 
-# ---------------------------------------------------------------- Stufe 1–4: Index + Analyse
+# ---------------------------------------------------------------- Stages 1–4: index + analysis
 
 LIBRARY: str | None = None  # set from --library in main()
 
@@ -287,7 +287,7 @@ def check_photos_app_library() -> bool:
 
 
 def library_photos(args):
-    log("Lese Fotos-Mediathek …")
+    log("Reading Photos library …")
     db = open_photos_db()
     photos = [p for p in db.photos(images=True, movies=False)
               if not p.intrash and not p.hidden and p.date is not None]
@@ -300,7 +300,7 @@ def library_photos(args):
     photos.sort(key=lambda p: p.date)
     if args.limit:
         photos = photos[-args.limit:]
-    log(f"{len(photos)} Fotos im Auswahlbereich")
+    log(f"{len(photos)} photos in the selected range")
     return photos
 
 
@@ -315,12 +315,12 @@ def analyze(con, photos, args) -> None:
             skipped += 1
             continue
         todo.append((p, path))
-    log(f"{len(todo)} neue Fotos zu analysieren, {skipped} ohne lokale Datei übersprungen")
+    log(f"{len(todo)} new photos to analyze, {skipped} skipped without a local file")
     if not todo:
         return
 
     device = pick_device(args.device)
-    log(f"Lade Modelle auf {device} …")
+    log(f"Loading models on {device} …")
     embedder = Embedder(device)
     iqa = IQA(device)
 
@@ -348,10 +348,10 @@ def analyze(con, photos, args) -> None:
         con.commit()
         done += len(chunk)
         rate = done / max(time.time() - t0, 1e-6)
-        log(f"{done}/{len(todo)} analysiert ({rate:.1f} Fotos/s, Rest ≈ {(len(todo) - done) / rate / 60:.0f} min)")
+        log(f"{done}/{len(todo)} analyzed ({rate:.1f} photos/s, ≈ {(len(todo) - done) / rate / 60:.0f} min left)")
 
 
-# ---------------------------------------------------------------- Stufe 3: Gruppieren
+# ---------------------------------------------------------------- Stage 3: grouping
 
 @dataclass
 class Item:
@@ -381,8 +381,8 @@ def load_items(con, uuids: set[str]) -> list[Item]:
 
 
 def group_items(items: list[Item], time_gap: float, sim_thr: float, max_window: int = 80) -> list[list[Item]]:
-    """Fotos, die zeitlich nah beieinander liegen, bilden ein Fenster.
-    Innerhalb eines Fensters werden Paare mit Cosinus-Ähnlichkeit >= sim_thr verbunden (Union-Find)."""
+    """Photos taken close together in time form a window.
+    Within a window, pairs with cosine similarity >= sim_thr are linked (union-find)."""
     groups: list[list[Item]] = []
 
     def flush(win: list[Item]):
@@ -420,11 +420,11 @@ def group_items(items: list[Item], time_gap: float, sim_thr: float, max_window: 
     return groups
 
 
-# ---------------------------------------------------------------- Stufe 5: Ranking
+# ---------------------------------------------------------------- Stage 5: ranking
 
 def rank_group(group: list[Item], weights: dict) -> list[Item]:
-    """Min-Max-Normalisierung je Merkmal innerhalb der Gruppe, dann gewichtete Summe.
-    Merkmale, die in der ganzen Gruppe fehlen (z. B. keine Gesichter), zählen nicht mit."""
+    """Min-max normalization per feature within the group, then a weighted sum.
+    Features missing across the whole group (e.g. no faces) are not counted."""
     used = {}
     for f in FEATURES:
         vals = [g.raw[f] for g in group if g.raw[f] is not None]
@@ -445,7 +445,7 @@ def rank_group(group: list[Item], weights: dict) -> list[Item]:
     return sorted(group, key=lambda g: g.score, reverse=True)
 
 
-# ---------------------------------------------------------------- Stufe 6: Vision-LLM
+# ---------------------------------------------------------------- Stage 6: vision LLM
 
 def _encode(path: str, max_side: int = 768) -> str:
     buf = io.BytesIO()
@@ -481,14 +481,14 @@ def vlm_pick(cands: list[Item], model: str, host: str) -> tuple[int, str] | None
         if 0 <= idx < len(cands):
             return idx, str(data.get("reason", ""))
     except Exception as e:  # noqa: BLE001
-        log(f"Vision-LLM fehlgeschlagen: {e}")
+        log(f"Vision LLM failed: {e}")
     return None
 
 
-# ---------------------------------------------------------------- Stufe 7: Ausgabe
+# ---------------------------------------------------------------- Stage 7: output
 
-CAND_KEYWORD = "loeschkandidat"
-BEST_KEYWORD = "bestes_foto"
+CAND_KEYWORD = "cleanup_candidate"
+BEST_KEYWORD = "cleanup_best"
 
 _KEYWORD_SCRIPT = """
 on run argv
@@ -518,11 +518,11 @@ end run
 
 
 def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
-    """Gibt genau diesen Fotos das Schlagwort; ein intelligentes Album in Fotos zeigt sie an.
-    Patched: the keyword is only removed from photos inside `scope` (this run's date range), so scanning
-    one year at a time no longer wipes earlier years' tags. IDs are sent in batches to stay under ARG_MAX.
-    Fotos per Skript in Alben legen geht unter macOS 27 nicht (PhotoKit und AppleScript werden still abgelehnt),
-    Schlagwörter setzen schon."""
+    """Give exactly these photos the keyword; a smart album in Photos shows them.
+    The keyword is only removed from photos inside `scope` (this run's date range), so scanning
+    one year at a time doesn't wipe earlier years' tags. IDs are sent in batches to stay under ARG_MAX.
+    Adding photos to albums by script doesn't work on macOS 27 (PhotoKit and AppleScript are silently
+    rejected), but setting keywords does."""
     import subprocess
 
     def run(mode, ids):
@@ -531,7 +531,7 @@ def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
             r = subprocess.run(["osascript", "-", mode, keyword, *chunk], input=_KEYWORD_SCRIPT,
                                text=True, capture_output=True)
             if r.returncode:
-                log(f"Schlagwort „{keyword}“ ({mode}) fehlgeschlagen: {r.stderr.strip()}")
+                log(f"Keyword “{keyword}” ({mode}) failed: {r.stderr.strip()}")
                 continue
             n += int(r.stdout.strip() or 0)
         return n
@@ -539,7 +539,7 @@ def tag_photos(keyword: str, uuids: list[str], scope: set[str]) -> None:
     old = {p.uuid for p in open_photos_db().photos(keywords=[keyword])}
     removed = run("remove", sorted((old & scope) - set(uuids)))
     added = run("add", sorted(set(uuids) - old))
-    log(f"Schlagwort „{keyword}“: {added} neu, {len(set(uuids) & old)} schon da, {removed} entfernt")
+    log(f"Keyword “{keyword}”: {added} added, {len(set(uuids) & old)} already present, {removed} removed")
 
 
 def cmd_scan(args) -> None:
@@ -549,8 +549,8 @@ def cmd_scan(args) -> None:
 
     items = load_items(con, {p.uuid for p in photos})
     groups = group_items(items, args.time_gap, args.sim)
-    log(f"{len(groups)} Gruppen ähnlicher Fotos gefunden "
-        f"({sum(len(g) for g in groups)} Fotos)")
+    log(f"Found {len(groups)} groups of similar photos "
+        f"({sum(len(g) for g in groups)} photos)")
 
     weights = load_weights()
     run = datetime.now().strftime("%Y-%m-%d %H-%M")
@@ -577,38 +577,38 @@ def cmd_scan(args) -> None:
             con.execute("INSERT OR REPLACE INTO decisions VALUES(?,?,?,?,?,?)",
                         (run, gi, it.uuid, it.score, int(is_best), json.dumps(it.norm)))
             report.append({
-                "gruppe": gi + 1, "rang": rank + 1, "behalten": "ja" if is_best else "",
-                "datei": it.filename, "datum": datetime.fromtimestamp(it.ts).isoformat(timespec="seconds"),
+                "group": gi + 1, "rank": rank + 1, "keep": "yes" if is_best else "",
+                "filename": it.filename, "date": datetime.fromtimestamp(it.ts).isoformat(timespec="seconds"),
                 "score": round(it.score, 3),
                 **{f: (None if it.raw[f] is None else round(it.raw[f], 3)) for f in FEATURES},
-                "knapp": "ja" if close else "", "llm_begruendung": reason if is_best else "",
+                "close": "yes" if close else "", "vlm_reason": reason if is_best else "",
                 "uuid": it.uuid,
             })
     con.commit()
 
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = REPORT_DIR / f"bericht {run}.csv"
+    csv_path = REPORT_DIR / f"report {run}.csv"
     if report:
         with open(csv_path, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(report[0].keys()), delimiter=";")
             w.writeheader()
             w.writerows(report)
-        log(f"Bericht: {csv_path}")
+        log(f"Report: {csv_path}")
 
     if vlm_used:
-        log(f"Vision-LLM hat in {vlm_used} knappen Gruppen entschieden")
+        log(f"Vision LLM decided {vlm_used} close groups")
     if args.no_albums:
-        log("--no-albums: keine Schlagwörter gesetzt")
+        log("--no-albums: no keywords set")
     elif groups and check_photos_app_library():
         scope = {p.uuid for p in photos}
         tag_photos(CAND_KEYWORD, cand_uuids, scope)
         tag_photos(BEST_KEYWORD, best_uuids, scope)
-        log(f"In Fotos: Ablage → Neues intelligentes Album → Schlagwort ist „{CAND_KEYWORD}“ "
-            f"(zum Vergleichen: „Beliebige“ Regel + Schlagwort ist „{BEST_KEYWORD}“)")
-    log(f"Fertig: {len(best_uuids)} beste Fotos, {len(cand_uuids)} Löschkandidaten. Gelöscht wurde nichts.")
+        log(f"In Photos: File → New Smart Album → Keyword is “{CAND_KEYWORD}” "
+            f"(to compare: match “any” rule + Keyword is “{BEST_KEYWORD}”)")
+    log(f"Done: {len(best_uuids)} best photos, {len(cand_uuids)} deletion candidates. Nothing was deleted.")
 
 
-# ---------------------------------------------------------------- Added: standalone low-quality photos
+# ---------------------------------------------------------------- Standalone low-quality photos
 
 LOWQ_KEYWORD = "cleanup_lowq"
 
@@ -695,7 +695,7 @@ def cmd_lowq(args) -> None:
     log("Nothing was deleted.")
 
 
-# ---------------------------------------------------------------- Stufe 8: Lernen
+# ---------------------------------------------------------------- Stage 8: learning
 
 def cmd_learn(args) -> None:
     from sklearn.linear_model import LogisticRegression
@@ -712,55 +712,55 @@ def cmd_learn(args) -> None:
 
     X, y = [], []
     for members in by_group.values():
-        # nur Gruppen, die du sichtbar durchgesehen hast (mind. ein Foto gelöscht, mind. eins behalten)
+        # only groups you visibly reviewed (at least one photo deleted, at least one kept)
         flags = [d for _, d in members]
         if any(flags) and not all(flags):
             for feats, deleted in members:
                 X.append([feats.get(f, 0.5) for f in FEATURES])
                 y.append(0 if deleted else 1)
 
-    log(f"{len(y)} Entscheidungen aus durchgesehenen Gruppen")
+    log(f"{len(y)} decisions from reviewed groups")
     if len(y) < 40 or len(set(y)) < 2:
-        log("Noch zu wenig Daten – erst ein paar Gruppen in Fotos durchsehen und Kandidaten löschen.")
+        log("Not enough data yet – review a few groups in Photos and delete candidates first.")
         return
 
     clf = LogisticRegression(max_iter=1000).fit(np.array(X), np.array(y))
     coefs = np.clip(clf.coef_[0], 0, None)
     if coefs.sum() == 0:
-        log("Kein klares Muster gefunden – Gewichte bleiben unverändert.")
+        log("No clear pattern found – weights unchanged.")
         return
     learned = coefs / coefs.sum()
-    # Mit Standardgewichten mischen, damit wenige Entscheidungen nicht überanpassen
+    # Blend with the default weights so a few decisions don't overfit
     alpha = len(y) / (len(y) + 200)
     new = {f: float(alpha * learned[i] + (1 - alpha) * DEFAULT_WEIGHTS[f]) for i, f in enumerate(FEATURES)}
     HOME.mkdir(parents=True, exist_ok=True)
     WEIGHTS_PATH.write_text(json.dumps(new, indent=2))
-    log("Neue Gewichte: " + ", ".join(f"{f}={w:.2f}" for f, w in new.items()))
+    log("New weights: " + ", ".join(f"{f}={w:.2f}" for f, w in new.items()))
 
 
 # ---------------------------------------------------------------- CLI
 
 def main(argv=None) -> None:
-    ap = argparse.ArgumentParser(description="Ähnliche Fotos finden und das beste auswählen (lokal).")
+    ap = argparse.ArgumentParser(description="Find similar photos and pick the best one (local).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     lib = argparse.ArgumentParser(add_help=False)
     lib.add_argument("--library", help="path to the .photoslibrary (default: the one Photos opened last)")
 
     common = argparse.ArgumentParser(add_help=False, parents=[lib])
-    common.add_argument("--since", help="nur Fotos ab Datum (YYYY-MM-DD)")
-    common.add_argument("--until", help="nur Fotos bis Datum (YYYY-MM-DD)")
-    common.add_argument("--limit", type=int, help="nur die neuesten N Fotos")
+    common.add_argument("--since", help="only photos on or after this date (YYYY-MM-DD)")
+    common.add_argument("--until", help="only photos on or before this date (YYYY-MM-DD)")
+    common.add_argument("--limit", type=int, help="only the newest N photos")
     common.add_argument("--device", default="auto", help="auto | mps | cpu")
     common.add_argument("--vlm-model", default="qwen3.5:9b-mlx")
     common.add_argument("--ollama", default="http://localhost:11434")
-    common.add_argument("--no-albums", action="store_true", help="nur CSV-Bericht, keine Schlagwörter in Fotos")
+    common.add_argument("--no-albums", action="store_true", help="CSV report only, no keywords in Photos")
 
     s = sub.add_parser("scan", parents=[common], help="similar photos: pick the best, tag the rest")
-    s.add_argument("--time-gap", type=float, default=30, help="max. Sekunden zwischen Fotos einer Serie (30)")
-    s.add_argument("--sim", type=float, default=0.90, help="Ähnlichkeitsschwelle 0–1 (0.90)")
-    s.add_argument("--vlm", action="store_true", help="knappe Gruppen von lokalem Vision-LLM entscheiden lassen")
-    s.add_argument("--vlm-margin", type=float, default=0.08, help="Score-Abstand, ab dem eine Gruppe als knapp gilt")
+    s.add_argument("--time-gap", type=float, default=30, help="max. seconds between photos of a series (30)")
+    s.add_argument("--sim", type=float, default=0.90, help="similarity threshold 0–1 (0.90)")
+    s.add_argument("--vlm", action="store_true", help="let a local vision LLM decide close groups")
+    s.add_argument("--vlm-margin", type=float, default=0.08, help="score gap below which a group counts as close")
     s.set_defaults(func=cmd_scan)
 
     q = sub.add_parser("lowq", parents=[common], help="standalone low-quality photos")
@@ -769,12 +769,12 @@ def main(argv=None) -> None:
     q.add_argument("--vlm", action="store_true", help="ask the local VLM to confirm each flagged photo")
     q.set_defaults(func=cmd_lowq)
 
-    l = sub.add_parser("learn", parents=[lib], help="Gewichte aus deinen Lösch-Entscheidungen lernen")
+    l = sub.add_parser("learn", parents=[lib], help="learn weights from your deletion decisions")
     l.set_defaults(func=cmd_learn)
 
     args = ap.parse_args(argv)
     if sys.platform != "darwin":
-        sys.exit("Dieses Skript läuft nur auf macOS (Fotos-Mediathek).")
+        sys.exit("This script only runs on macOS (Photos library).")
     global LIBRARY
     LIBRARY = args.library
     args.func(args)
