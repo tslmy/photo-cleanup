@@ -1,5 +1,9 @@
 # photo_cleanup – find similar photos, keep the best
 
+[![CI](https://github.com/tslmy/photo-cleanup/actions/workflows/ci.yml/badge.svg)](https://github.com/tslmy/photo-cleanup/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/tslmy/photo-cleanup/graph/badge.svg)](https://codecov.io/gh/tslmy/photo-cleanup)
+[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/tslmy/photo-cleanup/main.svg)](https://results.pre-commit.ci/latest/github/tslmy/photo-cleanup/main)
+
 Runs entirely locally on your Mac. Reads your Apple Photos library, groups similar shots (SigLIP embeddings + time window), picks the best photo in each group (TOPIQ, LAION aesthetics, Apple Vision aesthetics, face quality, eyes open), and tags it with the keyword **cleanup_best** and all others with **cleanup_candidate**. **It never deletes anything** – you review the candidates in Photos and delete them yourself.
 
 > Upgrading from an earlier version? The keywords used to be German (`bestes_foto`, `loeschkandidat`). Old tags are not removed automatically; delete those keywords in Photos (Window → Keyword Manager) and update your smart albums.
@@ -107,3 +111,13 @@ All features are normalized to 0–1 within each group. If someone blinks, there
 - Photos that live only in iCloud and have no local preview are skipped (the count is shown in the output). Workaround: in Photos → Settings → iCloud, briefly choose "Download Originals to this Mac".
 - Eye detection is a heuristic and unreliable for profiles or sunglasses.
 - Videos and the video part of Live Photos are not considered.
+
+## Development
+
+```bash
+uv sync
+uv run pytest --cov      # unit tests + coverage report
+uvx pre-commit install   # lint/format checks on every commit (also run by pre-commit.ci)
+```
+
+CI runs the tests on Linux, which works because the ML and macOS-only dependencies are imported lazily and the tests never touch them. Coverage is reported to Codecov.

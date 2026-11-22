@@ -93,7 +93,8 @@ class Review:
         self.api = api
         self.report_dir = Path(api.REPORT_DIR)
         self.thumb_dir = Path(api.HOME) / "thumbs"
-        self.extra = {initial.name: initial} if initial and initial.parent.resolve() != self.report_dir.resolve() else {}
+        external = initial and initial.parent.resolve() != self.report_dir.resolve()
+        self.extra = {initial.name: initial} if external else {}
         self.initial = initial.name if initial else None
         self.lock = threading.Lock()
         self.apply_lock = threading.Lock()

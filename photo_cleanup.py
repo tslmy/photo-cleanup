@@ -169,7 +169,7 @@ class IQA:
         for key, m in list(self.metrics.items()):
             try:
                 out[key] = float(m(t.to(m.device)).item())
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 if str(m.device) != "cpu":  # e.g. missing MPS ops: continue on CPU
                     log(f"{key} failed on {m.device} – continuing on CPU")
                     try:
@@ -210,7 +210,8 @@ def apple_vision_scores(path: str) -> dict:
     except ImportError:
         return out
     try:
-        handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(NSURL.fileURLWithPath_(path), None)  # pyobjc 13: {} -> "key does not exist"
+        # pyobjc 13: passing {} as options -> "key does not exist", so pass None
+        handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(NSURL.fileURLWithPath_(path), None)
         aes_req = None
         reqs = []
         if hasattr(Vision, "VNCalculateImageAestheticsScoresRequest"):
@@ -779,8 +780,8 @@ def main(argv=None) -> None:
     q.add_argument("--vlm", action="store_true", help="ask the local VLM to confirm each flagged photo")
     q.set_defaults(func=cmd_lowq)
 
-    l = sub.add_parser("learn", parents=[lib], help="learn weights from your deletion decisions")
-    l.set_defaults(func=cmd_learn)
+    ln = sub.add_parser("learn", parents=[lib], help="learn weights from your deletion decisions")
+    ln.set_defaults(func=cmd_learn)
 
     v = sub.add_parser("serve", parents=[lib], help="web UI to review a report and approve deletions")
     v.add_argument("report", nargs="?", help="report CSV path or file name (default: the newest report)")
